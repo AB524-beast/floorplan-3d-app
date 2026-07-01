@@ -3,46 +3,70 @@ import numpy as np
 
 def detect_walls_from_image(image_bytes: bytes) -> list:
     """
-    Processes a floor plan image using OpenCV to extract wall vector lines.
-    Returns a list of dicts: [{'start': {'x': x1, 'y': y1}, 'end': {'x': x2, 'y': y2}}]
+    Locally processes a floor plan image using adaptive thresholding, 
+    morphological cleanup, and probabilistic Hough vector extraction.
     """
-    # 1. Convert raw image bytes into an OpenCV matrix image
+    # 1. Convert raw incoming bytes into an OpenCV image matrix
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
+        print("--- [ERROR] Failed to decode image bytes ---")
         return []
 
-    # 2. Preprocessing: Convert to grayscale and apply adaptive thresholding
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # This isolates sharp black structural lines from blueprint papers
+    # 2. Normalize Canvas Dimensions (Crucial for consistent coordinate mapping)
+    # We resize the processed dimensions to match your 600x500 React Canvas aspect area
+    target_width = 600
+    target_height = 500
+    img_resized = cv2.resize(img, (target_width, target_height), interpolation=cv2.INTER_AREA)
+
+    # 3. Preprocessing: Convert to Grayscale
+    gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
+    
+    # 4. Adaptive Thresholding (Isolates layout structures from messy blueprints)
+    # Blurs the background and highlights solid dark lines/walls
     thresh = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 2
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 3
     )
 
-    # 3. Detect Lines using Probabilistic Hough Transform
-    # Adjust these thresholds based on blueprint qualities
-    min_line_length = 30
-    max_line_gap = 10
+    # 5. Morphological Operations (Cleans text, furniture, and connects gaps)
+    # We use a 3x3 square kernel to melt away text labels and isolate thick partitions
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    # 6. Extract Line Vector Segments
+    # minLineLength keeps small furniture out, maxLineGap bridges broken wall sections
+    min_line_length = 25
+    max_line_gap = 15
     lines = cv2.HoughLinesP(
         thresh, 
         rho=1, 
         theta=np.pi/180, 
-        threshold=50, 
+        threshold=40, 
         minLineLength=min_line_length, 
         maxLineGap=max_line_gap
     )
 
     detected_walls = []
-    
+
     if lines is not None:
+        print(f"\n--- [LOCAL CV ENGINE] Successfully extracted {len(lines)} raw line vectors ---")
         for line in lines:
             x1, y1, x2, y2 = line[0]
             
-            # Basic sanity check: skip microscopic line artifacts
-            if np.hypot(x2 - x1, y2 - y1) > 10:
-                detected_walls.append({
-                    "start": {"x": int(x1), "y": int(y1)},
-                    "end": {"x": int(x2), "y": int(y2)}
-                })
+            # Snap lines perfectly straight (Orthogonal Snapping)
+            # This makes sure walls match up perfectly on a 90-degree 3D grid
+            if abs(x2 - x1) < 15:
+                x2 = x1
+            elif abs(y2 - y1) < 15:
+                y2 = y1
 
+            detected_walls.append({
+                "start": {"x": int(x1), "y": int(y1)},
+                "end": {"x": int(x2), "y": int(y2)}
+            })
+    else:
+        print("\n--- [LOCAL CV ENGINE] Warning: No lines detected in the processed image ---")
+
+    print(f"--- [ENGINE COMPLETION] Dispatching {len(detected_walls)} walls to front-end UI ---\n")
     return detected_walls

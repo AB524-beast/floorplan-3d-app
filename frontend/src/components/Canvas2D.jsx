@@ -1,18 +1,20 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Undo2, Trash2, Upload } from 'lucide-react';
+import { Undo2, Trash2, Upload, Sparkles, Loader2 } from 'lucide-react';
+import axios from 'axios';
 
 export default function Canvas2D({ onWallsUpdate }) {
   const canvasRef = useRef(null);
   const [image, setImage] = useState(null);
+  const [imageFile, setImageFile] = useState(null); // Keep raw file for backend upload
   const [walls, setWalls] = useState([]);
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPoint, setStartPoint] = useState(null);
   const [currentMousePos, setCurrentMousePos] = useState(null);
+  const [isProcessing, setIsProcessing] = useState(false);
 
-  // Redraw canvas whenever walls, image, or mouse cursor moves
   useEffect(() => {
     drawCanvas();
-    onWallsUpdate(walls); // Notify parent component/3D viewer of the updates
+    onWallsUpdate(walls);
   }, [walls, image, currentMousePos, isDrawing]);
 
   // Handle Image Upload
@@ -20,6 +22,7 @@ export default function Canvas2D({ onWallsUpdate }) {
     const file = e.target.files[0];
     if (!file) return;
 
+    setImageFile(file); // Save file blob for API
     const reader = new FileReader();
     reader.onload = (event) => {
       const img = new Image();
@@ -29,15 +32,37 @@ export default function Canvas2D({ onWallsUpdate }) {
     reader.readAsDataURL(file);
   };
 
+  // Trigger OpenCV Backend Wall Detection
+  const handleAutoDetect = async () => {
+    if (!imageFile) return;
+    setIsProcessing(true);
+
+    const formData = new FormData();
+    formData.append('file', imageFile);
+
+    try {
+      // Connects directly to your local FastAPI server
+      const response = await axios.post('http://localhost:8000/api/auto-detect', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+
+      if (response.data.success) {
+        setWalls(response.data.walls);
+      }
+    } catch (error) {
+      console.error("Error running AI wall detection:", error);
+      alert("Failed to auto-detect walls. Make sure your Python server is running on port 8000!");
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   const drawCanvas = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
-    
-    // Clear Canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // 1. Draw Background Image (Scaled to fit canvas maintaining aspect ratio)
     if (image) {
       const hRatio = canvas.width / image.width;
       const vRatio = canvas.height / image.height;
@@ -47,18 +72,16 @@ export default function Canvas2D({ onWallsUpdate }) {
       ctx.drawImage(image, 0, 0, image.width, image.height,
         centerShift_x, centerShift_y, image.width * ratio, image.height * ratio);
     } else {
-      // Guide message if no image loaded
       ctx.font = '16px sans-serif';
       ctx.fillStyle = '#9ca3af';
       ctx.textAlign = 'center';
       ctx.fillText('Upload a 2D floor plan to start tracing', canvas.width / 2, canvas.height / 2);
     }
 
-    // 2. Draw Already Created Walls
+    // Draw Saved Walls
     ctx.lineWidth = 5;
     ctx.lineCap = 'round';
-    ctx.strokeStyle = '#2563eb'; // Blue for saved walls
-    
+    ctx.strokeStyle = '#2563eb';
     walls.forEach(wall => {
       ctx.beginPath();
       ctx.moveTo(wall.start.x, wall.start.y);
@@ -66,31 +89,27 @@ export default function Canvas2D({ onWallsUpdate }) {
       ctx.stroke();
     });
 
-    // 3. Draw Preview Line (While user is actively dragging mouse)
+    // Draw Live Preview Line
     if (isDrawing && startPoint && currentMousePos) {
       ctx.lineWidth = 5;
-      ctx.strokeStyle = '#10b981'; // Green for active line preview
-      ctx.setLineDash([5, 5]); // Dashed line
+      ctx.strokeStyle = '#10b981';
+      ctx.setLineDash([5, 5]);
       ctx.beginPath();
       ctx.moveTo(startPoint.x, startPoint.y);
       ctx.lineTo(currentMousePos.x, currentMousePos.y);
       ctx.stroke();
-      ctx.setLineDash([]); // Reset line dash
+      ctx.setLineDash([]);
     }
   };
 
-  // Mouse Interaction Handlers
   const getMousePos = (e) => {
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
-    return {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top
-    };
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
   const handleMouseDown = (e) => {
-    if (!image) return; // Prevent tracing without a layout image
+    if (!image) return;
     const pos = getMousePos(e);
     setIsDrawing(true);
     setStartPoint(pos);
@@ -105,13 +124,10 @@ export default function Canvas2D({ onWallsUpdate }) {
   const handleMouseUp = (e) => {
     if (!isDrawing) return;
     const endPoint = getMousePos(e);
-    
-    // Ignore accidental tiny clicks
     const distance = Math.hypot(endPoint.x - startPoint.x, endPoint.y - startPoint.y);
     if (distance > 5) {
       setWalls([...walls, { start: startPoint, end: endPoint }]);
     }
-    
     setIsDrawing(false);
     setStartPoint(null);
     setCurrentMousePos(null);
@@ -119,13 +135,23 @@ export default function Canvas2D({ onWallsUpdate }) {
 
   return (
     <div className="flex flex-col items-center bg-gray-50 p-4 rounded-xl border border-gray-200 shadow-sm w-full">
-      {/* Toolbar Controls */}
-      <div className="flex gap-4 mb-4 w-full justify-between items-center bg-white p-2 rounded-lg shadow-inner">
-        <label className="flex items-center gap-2 bg-blue-600 text-white px-3 py-1.5 rounded-md text-sm font-medium cursor-pointer hover:bg-blue-700 transition">
-          <Upload size={16} />
-          Upload Plan
-          <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
-        </label>
+      <div className="flex gap-2 mb-4 w-full justify-between items-center bg-white p-2 rounded-lg shadow-inner flex-wrap">
+        <div className="flex gap-2">
+          <label className="flex items-center gap-2 bg-blue-600 text-white px-3 py-1.5 rounded-md text-sm font-medium cursor-pointer hover:bg-blue-700 transition">
+            <Upload size={16} />
+            Upload Plan
+            <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+          </label>
+
+          <button
+            onClick={handleAutoDetect}
+            disabled={!imageFile || isProcessing}
+            className="flex items-center gap-2 bg-purple-600 text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-purple-700 transition disabled:opacity-50"
+          >
+            {isProcessing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+            AI Auto-Detect
+          </button>
+        </div>
         
         <div className="flex gap-2">
           <button 
@@ -145,7 +171,6 @@ export default function Canvas2D({ onWallsUpdate }) {
         </div>
       </div>
 
-      {/* Drawing Space */}
       <canvas
         ref={canvasRef}
         width={600}
